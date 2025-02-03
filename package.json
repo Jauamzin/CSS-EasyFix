@@ -9,13 +9,15 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onCommand:css-easyfix.helloWorld"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
       {
         "command": "css-easyfix.helloWorld",
-        "title": "Hello World"
+        "title": "CSS EasyFix: Edit CSS for Element"
       }
     ]
   },
