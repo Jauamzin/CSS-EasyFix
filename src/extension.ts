@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { parse, HTMLElement } from 'node-html-parser';
 import * as css from 'css';
 import * as select from 'css-select';
@@ -22,63 +23,66 @@ function collectElements(root: ParsedHTMLElement): ParsedHTMLElement[] {
   return elements;
 }
 
-// Convert a parsed element to a minimal object along with its index.
-function elementToMinimal(el: ParsedHTMLElement, index: number) {
+// Convert a parsed element to a minimal DOM for css-select.
+function toCssSelectDom(el: ParsedHTMLElement): any {
   return {
-    index,
-    tagName: el.tagName,
-    id: el.getAttribute('id') || '',
-    class: el.getAttribute('class') || ''
+    type: 'tag',
+    name: el.tagName,
+    attribs: {
+      id: el.getAttribute('id') || '',
+      class: el.getAttribute('class') || ''
+    },
+    children: el.childNodes
+      .filter(child => child.nodeType === 1)
+      .map(child => toCssSelectDom(child as ParsedHTMLElement))
   };
 }
 
-// Create webview HTML content for selecting an element.
-function getSelectionWebviewContent(elements: any[]): string {
-  const elementsData = encodeURIComponent(JSON.stringify(elements));
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>Select HTML Element</title>
-  <style>
-    body { font-family: sans-serif; padding: 20px; }
-    ul { list-style: none; padding: 0; }
-    li { padding: 8px; border-bottom: 1px solid #ccc; cursor: pointer; }
-    li:hover { background-color: #e0e0e0; }
-  </style>
-</head>
-<body>
-  <h1>Select an HTML Element</h1>
-  <ul id="elementList"></ul>
-  <script>
-    const vscode = acquireVsCodeApi();
-    const elements = JSON.parse(decodeURIComponent("${elementsData}"));
-    const list = document.getElementById('elementList');
-    elements.forEach((el) => {
-      const li = document.createElement('li');
-      li.textContent = \`<\${el.tagName}\${el.id ? ' id="' + el.id + '"' : ''}\${el.class ? ' class="' + el.class + '"' : ''}>\`;
-      li.onclick = () => {
-        vscode.postMessage({ command: 'elementSelected', index: el.index });
-      };
-      list.appendChild(li);
-    });
-  </script>
-</body>
-</html>`;
-}
-
-// Reads the content of style.css from the workspace.
-async function getCssContent(): Promise<string> {
-  const cssFiles = await vscode.workspace.findFiles('**/style.css', '**/node_modules/**', 1);
-  if (cssFiles.length > 0) {
-    const fileData = await vscode.workspace.fs.readFile(cssFiles[0]);
-    return Buffer.from(fileData).toString('utf8');
+// Helper: Get all local CSS file URIs by looking at <link rel="stylesheet"> tags.
+function getAllCssFileUris(document: vscode.TextDocument): vscode.Uri[] {
+  const text = document.getText();
+  const root = parse(text);
+  const links = root.querySelectorAll('link[rel="stylesheet"]');
+  const uris: vscode.Uri[] = [];
+  for (const link of links) {
+    const href = link.getAttribute('href');
+    if (href && !href.startsWith('http')) {
+      const docDir = path.dirname(document.uri.fsPath);
+      const cssPath = path.join(docDir, href);
+      uris.push(vscode.Uri.file(cssPath));
+    }
   }
-  return '/* No style.css found */';
+  return uris;
 }
 
-// Given the CSS file content and a target HTML element,
-// filter the CSS rules that match the element.
+// Reads and concatenates the content of all local CSS files referenced in the HTML.
+async function getCombinedCssContent(document: vscode.TextDocument): Promise<string> {
+  let cssUris = getAllCssFileUris(document);
+  if (cssUris.length === 0) {
+    // Fallback: search for style.css in the workspace.
+    const cssFiles = await vscode.workspace.findFiles('**/style.css', '**/node_modules/**', 1);
+    if (cssFiles.length > 0) {
+      cssUris.push(cssFiles[0]);
+    }
+  }
+  let combined = '';
+  for (const uri of cssUris) {
+    try {
+      const fileData = await vscode.workspace.fs.readFile(uri);
+      combined += Buffer.from(fileData).toString('utf8') + "\n";
+    } catch (e) {
+      console.error('Error reading CSS file:', e);
+    }
+  }
+  return combined || '/* No stylesheet found */';
+}
+
+// Reads the combined CSS content.
+async function getCssContent(document: vscode.TextDocument): Promise<string> {
+  return getCombinedCssContent(document);
+}
+
+// Filter CSS rules from the CSS content that match the target HTML element.
 function filterCssRulesForElement(cssContent: string, target: ParsedHTMLElement): string {
   const parsedCss = css.parse(cssContent);
   if (!parsedCss.stylesheet) {
@@ -103,21 +107,6 @@ function filterCssRulesForElement(cssContent: string, target: ParsedHTMLElement)
     stylesheet: { rules: matchingRules }
   } as css.Stylesheet;
   return css.stringify(filteredStylesheet);
-}
-
-// Convert a ParsedHTMLElement into a minimal DOM for css-select.
-function toCssSelectDom(el: ParsedHTMLElement): any {
-  return {
-    type: 'tag',
-    name: el.tagName,
-    attribs: {
-      id: el.getAttribute('id') || '',
-      class: el.getAttribute('class') || ''
-    },
-    children: el.childNodes
-      .filter(child => child.nodeType === 1)
-      .map(child => toCssSelectDom(child as ParsedHTMLElement))
-  };
 }
 
 // Create webview content for editing CSS rules.
@@ -150,34 +139,69 @@ function getEditWebviewContent(editableCss: string): string {
 </html>`;
 }
 
-// Update the style.css file with new CSS content.
-async function updateCssFile(newCss: string): Promise<void> {
-  const cssFiles = await vscode.workspace.findFiles('**/style.css', '**/node_modules/**', 1);
-  if (cssFiles.length > 0) {
-    const cssUri = cssFiles[0];
-    const document = await vscode.workspace.openTextDocument(cssUri);
-    const fullRange = new vscode.Range(
-      document.positionAt(0),
-      document.positionAt(document.getText().length)
-    );
-    const edit = new vscode.WorkspaceEdit();
-    edit.replace(cssUri, fullRange, newCss);
-    const applied = await vscode.workspace.applyEdit(edit);
-    if (applied) {
-      await document.save();
-      vscode.window.showInformationMessage('style.css updated successfully!');
-    } else {
-      vscode.window.showErrorMessage('Failed to update style.css.');
+// Update all local CSS files by merging updated rules with existing content.
+async function updateCssFiles(newCss: string, document: vscode.TextDocument): Promise<void> {
+  const cssUris = getAllCssFileUris(document);
+  if (cssUris.length === 0) {
+    vscode.window.showErrorMessage('No stylesheet files found to update.');
+    return;
+  }
+  for (const cssUri of cssUris) {
+    try {
+      const fileData = await vscode.workspace.fs.readFile(cssUri);
+      const originalCss = Buffer.from(fileData).toString('utf8');
+      const originalParsed = css.parse(originalCss);
+      const newParsed = css.parse(newCss);
+
+      if (!originalParsed.stylesheet || !newParsed.stylesheet) {
+        vscode.window.showErrorMessage('Error parsing CSS in ' + cssUri.fsPath);
+        continue;
+      }
+
+      // Merge new rules into the original stylesheet.
+      newParsed.stylesheet!.rules.forEach(newRule => {
+        if (newRule.type === 'rule') {
+          const newSelectors = Array.isArray(newRule.selectors) ? newRule.selectors : [];
+          if (newSelectors.length === 0) return;
+          const existingRuleIndex = originalParsed.stylesheet!.rules.findIndex(rule => {
+            if (rule.type === 'rule' && Array.isArray(rule.selectors)) {
+              const existingSelectors = rule.selectors || [];
+              return existingSelectors.join(',') === newSelectors.join(',');
+            }
+            return false;
+          });
+          if (existingRuleIndex !== -1) {
+            originalParsed.stylesheet!.rules[existingRuleIndex] = newRule;
+          } else {
+            originalParsed.stylesheet!.rules.push(newRule);
+          }
+        }
+      });
+
+      const mergedCss = css.stringify(originalParsed);
+      const cssDoc = await vscode.workspace.openTextDocument(cssUri);
+      const fullRange = new vscode.Range(
+        cssDoc.positionAt(0),
+        cssDoc.positionAt(cssDoc.getText().length)
+      );
+      const edit = new vscode.WorkspaceEdit();
+      edit.replace(cssUri, fullRange, mergedCss);
+      const applied = await vscode.workspace.applyEdit(edit);
+      if (applied) {
+        await cssDoc.save();
+        vscode.window.showInformationMessage(`Stylesheet updated successfully: ${cssUri.fsPath}`);
+      } else {
+        vscode.window.showErrorMessage(`Failed to update the stylesheet: ${cssUri.fsPath}`);
+      }
+    } catch (e) {
+      vscode.window.showErrorMessage(`Error processing stylesheet: ${cssUri.fsPath}`);
     }
-  } else {
-    vscode.window.showErrorMessage("Could not find style.css to update.");
   }
 }
 
 let parsedElements: ParsedHTMLElement[] = [];
 
 export function activate(context: vscode.ExtensionContext) {
-  // Command to select an element via a webview.
   let selectionCommand = vscode.commands.registerCommand('css-easyfix.selectHtmlElement', async () => {
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
@@ -196,24 +220,56 @@ export function activate(context: vscode.ExtensionContext) {
       withEndIndices: true
     } as any) as ParsedHTMLElement;
     parsedElements = collectElements(root);
-    const minimalElements = parsedElements.map((el, index) => elementToMinimal(el, index));
+    const minimalElements = parsedElements.map((el, index) => ({
+      index,
+      tagName: el.tagName,
+      id: el.getAttribute('id') || '',
+      class: el.getAttribute('class') || ''
+    }));
     const panel = vscode.window.createWebviewPanel(
       'cssEasyFixSelect',
       'Select HTML Element',
       vscode.ViewColumn.Beside,
       { enableScripts: true }
     );
-    panel.webview.html = getSelectionWebviewContent(minimalElements);
+    const elementsData = encodeURIComponent(JSON.stringify(minimalElements));
+    panel.webview.html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Select HTML Element</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; }
+    ul { list-style: none; padding: 0; }
+    li { padding: 8px; border-bottom: 1px solid #ccc; cursor: pointer; }
+    li:hover { background-color: #e0e0e0; }
+  </style>
+</head>
+<body>
+  <h1>Select an HTML Element</h1>
+  <ul id="elementList"></ul>
+  <script>
+    const vscode = acquireVsCodeApi();
+    const elements = JSON.parse(decodeURIComponent("${elementsData}"));
+    const list = document.getElementById('elementList');
+    elements.forEach((el) => {
+      const li = document.createElement('li');
+      li.textContent = \`<\${el.tagName}\${el.id ? ' id="' + el.id + '"' : ''}\${el.class ? ' class="' + el.class + '"' : ''}>\`;
+      li.onclick = () => {
+        vscode.postMessage({ command: 'elementSelected', index: el.index });
+      };
+      list.appendChild(li);
+    });
+  </script>
+</body>
+</html>`;
     
     panel.webview.onDidReceiveMessage(async message => {
       if (message.command === 'elementSelected') {
         const idx = message.index;
         if (typeof idx === 'number' && parsedElements[idx]) {
-          // Retrieve the CSS content.
-          const cssContent = await getCssContent();
-          // Filter rules affecting the selected element.
+          const cssContent = await getCssContent(document);
           const filteredCss = filterCssRulesForElement(cssContent, parsedElements[idx]);
-          // Open a new webview to edit the CSS.
           const editPanel = vscode.window.createWebviewPanel(
             'cssEasyFixEdit',
             'CSS EasyFix - Edit CSS for Element',
@@ -224,10 +280,10 @@ export function activate(context: vscode.ExtensionContext) {
           
           editPanel.webview.onDidReceiveMessage(async msg => {
             if (msg.command === 'applyCss') {
-              await updateCssFile(msg.updatedCss);
+              await updateCssFiles(msg.updatedCss, document);
             }
           });
-          panel.dispose(); // Close the selection panel.
+          panel.dispose();
         } else {
           vscode.window.showErrorMessage('Invalid element selection.');
         }
