@@ -1,7 +1,7 @@
 {
   "name": "css-easyfix",
-  "displayName": "css easyfix",
-  "description": "",
+  "displayName": "CSS EasyFix",
+  "description": "A revolutionary VS Code extension to inspect and edit CSS for HTML elements directly in your editor.",
   "version": "0.0.1",
   "engines": {
     "vscode": "^1.96.0"
@@ -10,14 +10,14 @@
     "Other"
   ],
   "activationEvents": [
-    "onCommand:css-easyfix.helloWorld"
+    "onCommand:css-easyfix.selectHtmlElement"
   ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "css-easyfix.helloWorld",
-        "title": "CSS EasyFix: Edit CSS for Element"
+        "command": "css-easyfix.selectHtmlElement",
+        "title": "CSS EasyFix: Select HTML Element"
       }
     ]
   },
@@ -30,14 +30,20 @@
     "test": "vscode-test"
   },
   "devDependencies": {
-    "@types/vscode": "^1.96.0",
+    "@types/css": "^0.0.38",
     "@types/mocha": "^10.0.10",
     "@types/node": "20.x",
+    "@types/vscode": "^1.96.0",
     "@typescript-eslint/eslint-plugin": "^8.22.0",
     "@typescript-eslint/parser": "^8.22.0",
-    "eslint": "^9.19.0",
-    "typescript": "^5.7.3",
     "@vscode/test-cli": "^0.0.10",
-    "@vscode/test-electron": "^2.4.1"
+    "@vscode/test-electron": "^2.4.1",
+    "eslint": "^9.19.0",
+    "typescript": "^5.7.3"
+  },
+  "dependencies": {
+    "css": "^3.0.0",
+    "css-select": "^5.1.0",
+    "node-html-parser": "^7.0.1"
   }
 }
