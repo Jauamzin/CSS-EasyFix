@@ -50,6 +50,6 @@ License 📜
 This project is licensed under the MIT License.
 
 Support 📧
-If you encounter any issues, open a GitHub issue or contact your.email@example.com.
+If you encounter any issues, open a GitHub issue or contact juanjnow@gmail.com.
 
 Start building pixel-perfect designs with CSS EasyFix! 🎉
