@@ -77,7 +77,6 @@ async function getCombinedCssContent(document: vscode.TextDocument): Promise<str
   return combined || '/* No stylesheet found */';
 }
 
-// Reads the combined CSS content.
 async function getCssContent(document: vscode.TextDocument): Promise<string> {
   return getCombinedCssContent(document);
 }
@@ -109,7 +108,7 @@ function filterCssRulesForElement(cssContent: string, target: ParsedHTMLElement)
   return css.stringify(filteredStylesheet);
 }
 
-// Create webview content for editing CSS rules.
+// Create a dark-themed webview content for editing CSS rules.
 function getEditWebviewContent(editableCss: string): string {
   return `<!DOCTYPE html>
 <html lang="en">
@@ -117,14 +116,51 @@ function getEditWebviewContent(editableCss: string): string {
   <meta charset="UTF-8">
   <title>CSS EasyFix - Edit CSS</title>
   <style>
-    body { font-family: sans-serif; padding: 20px; }
-    textarea { width: 100%; height: 70vh; font-family: monospace; font-size: 14px; }
-    button { margin-top: 10px; padding: 8px 16px; font-size: 14px; }
+    body {
+      font-family: "Segoe UI", sans-serif;
+      background-color: #1e1e1e;
+      color: #d4d4d4;
+      margin: 0;
+      padding: 20px;
+    }
+    h1 {
+      color: #569cd6;
+      margin-bottom: 10px;
+    }
+    p {
+      margin-bottom: 20px;
+    }
+    textarea {
+      width: 100%;
+      height: 60vh;
+      padding: 10px;
+      font-family: Consolas, monospace;
+      font-size: 14px;
+      border: 1px solid #333;
+      border-radius: 4px;
+      box-shadow: inset 0 1px 3px rgba(0,0,0,0.8);
+      background-color: #252526;
+      color: #d4d4d4;
+      resize: vertical;
+    }
+    button {
+      background-color: #0e639c;
+      color: #fff;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 4px;
+      font-size: 14px;
+      cursor: pointer;
+      transition: background-color 0.2s ease-in-out;
+    }
+    button:hover {
+      background-color: #1177bb;
+    }
   </style>
 </head>
 <body>
   <h1>CSS EasyFix</h1>
-  <p>Edit the CSS rules affecting the selected element:</p>
+  <p>Edit the CSS rules affecting the selected element below:</p>
   <textarea id="cssEditor">${editableCss}</textarea>
   <br>
   <button onclick="applyChanges()">Apply Changes</button>
@@ -134,6 +170,60 @@ function getEditWebviewContent(editableCss: string): string {
       const updatedCss = document.getElementById('cssEditor').value;
       vscode.postMessage({ command: 'applyCss', updatedCss });
     }
+  </script>
+</body>
+</html>`;
+}
+
+// Create a dark-themed webview content for selecting an HTML element.
+function getSelectionWebviewContent(elementsData: string): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Select HTML Element</title>
+  <style>
+    body {
+      font-family: "Segoe UI", sans-serif;
+      background-color: #1e1e1e;
+      color: #d4d4d4;
+      margin: 0;
+      padding: 20px;
+    }
+    h1 {
+      color: #569cd6;
+      margin-bottom: 20px;
+    }
+    ul {
+      list-style: none;
+      padding: 0;
+    }
+    li {
+      padding: 10px;
+      border-bottom: 1px solid #333;
+      cursor: pointer;
+      transition: background-color 0.2s ease;
+    }
+    li:hover {
+      background-color: #252526;
+    }
+  </style>
+</head>
+<body>
+  <h1>Select an HTML Element</h1>
+  <ul id="elementList"></ul>
+  <script>
+    const vscode = acquireVsCodeApi();
+    const elements = JSON.parse(decodeURIComponent("${elementsData}"));
+    const list = document.getElementById('elementList');
+    elements.forEach((el) => {
+      const li = document.createElement('li');
+      li.textContent = \`<\${el.tagName}\${el.id ? ' id="' + el.id + '"' : ''}\${el.class ? ' class="' + el.class + '"' : ''}>\`;
+      li.onclick = () => {
+        vscode.postMessage({ command: 'elementSelected', index: el.index });
+      };
+      list.appendChild(li);
+    });
   </script>
 </body>
 </html>`;
@@ -157,13 +247,15 @@ async function updateCssFiles(newCss: string, document: vscode.TextDocument): Pr
         vscode.window.showErrorMessage('Error parsing CSS in ' + cssUri.fsPath);
         continue;
       }
+      
+      const origStylesheet = originalParsed.stylesheet!;
+      const newStylesheet = newParsed.stylesheet!;
 
-      // Merge new rules into the original stylesheet.
-      newParsed.stylesheet!.rules.forEach(newRule => {
+      newStylesheet.rules.forEach(newRule => {
         if (newRule.type === 'rule') {
           const newSelectors = Array.isArray(newRule.selectors) ? newRule.selectors : [];
           if (newSelectors.length === 0) return;
-          const existingRuleIndex = originalParsed.stylesheet!.rules.findIndex(rule => {
+          const existingRuleIndex = origStylesheet.rules.findIndex(rule => {
             if (rule.type === 'rule' && Array.isArray(rule.selectors)) {
               const existingSelectors = rule.selectors || [];
               return existingSelectors.join(',') === newSelectors.join(',');
@@ -171,9 +263,9 @@ async function updateCssFiles(newCss: string, document: vscode.TextDocument): Pr
             return false;
           });
           if (existingRuleIndex !== -1) {
-            originalParsed.stylesheet!.rules[existingRuleIndex] = newRule;
+            origStylesheet.rules[existingRuleIndex] = newRule;
           } else {
-            originalParsed.stylesheet!.rules.push(newRule);
+            origStylesheet.rules.push(newRule);
           }
         }
       });
@@ -226,43 +318,14 @@ export function activate(context: vscode.ExtensionContext) {
       id: el.getAttribute('id') || '',
       class: el.getAttribute('class') || ''
     }));
+    const elementsData = encodeURIComponent(JSON.stringify(minimalElements));
     const panel = vscode.window.createWebviewPanel(
       'cssEasyFixSelect',
       'Select HTML Element',
       vscode.ViewColumn.Beside,
       { enableScripts: true }
     );
-    const elementsData = encodeURIComponent(JSON.stringify(minimalElements));
-    panel.webview.html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>Select HTML Element</title>
-  <style>
-    body { font-family: sans-serif; padding: 20px; }
-    ul { list-style: none; padding: 0; }
-    li { padding: 8px; border-bottom: 1px solid #ccc; cursor: pointer; }
-    li:hover { background-color: #e0e0e0; }
-  </style>
-</head>
-<body>
-  <h1>Select an HTML Element</h1>
-  <ul id="elementList"></ul>
-  <script>
-    const vscode = acquireVsCodeApi();
-    const elements = JSON.parse(decodeURIComponent("${elementsData}"));
-    const list = document.getElementById('elementList');
-    elements.forEach((el) => {
-      const li = document.createElement('li');
-      li.textContent = \`<\${el.tagName}\${el.id ? ' id="' + el.id + '"' : ''}\${el.class ? ' class="' + el.class + '"' : ''}>\`;
-      li.onclick = () => {
-        vscode.postMessage({ command: 'elementSelected', index: el.index });
-      };
-      list.appendChild(li);
-    });
-  </script>
-</body>
-</html>`;
+    panel.webview.html = getSelectionWebviewContent(elementsData);
     
     panel.webview.onDidReceiveMessage(async message => {
       if (message.command === 'elementSelected') {
